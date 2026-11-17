@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services import merge_files
 from app.store import store
 
 MODULE = "storage"
@@ -59,3 +60,20 @@ class StorageService:
         entry["pending"] = target != STATUS_ORDER[-1]
         entry["abnormal"] = action in NEGATIVE_ACTIONS
         return entry, f"存储策略已{action}"
+
+    # --- 归并文件数据：存储分层只做已提交快照的归档与核对 ---------------
+
+    def merge_files(self) -> list[dict[str, Any]]:
+        return merge_files.merge_file_entries()
+
+    def merge_file(self, download_id: str) -> dict[str, Any] | None:
+        for item in self.merge_files():
+            if str(item.get("下载编号")) == str(download_id):
+                return item
+        return None
+
+    def merge_summary(self) -> list[dict[str, Any]]:
+        return merge_files.merge_summary()
+
+    def archives(self, task_no: str | None = None) -> list[dict[str, Any]]:
+        return merge_files.archives(task_no)

@@ -1,4 +1,4 @@
-"""采集存储分层接口：维护存储策略，覆盖启用策略、暂停策略、关闭策略等动作。"""
+"""采集存储分层接口：维护存储策略，并承接归并文件的归档与状态核对。"""
 from __future__ import annotations
 
 from typing import Any
@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from app.schemas import ActionResult, EntryPayload, PageResult
+
 from app.services.storage import StorageService
 
 router = APIRouter(prefix="/api/storage", tags=["采集存储分层"])
@@ -28,6 +29,76 @@ def list_entries(
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
     items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
     return PageResult(items=items, total=total, page=page, size=size)
+
+
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出采集存储分层清单，并附带归并文件与快照核对结果，便于一并归档。"""
+    items, total = service.list_entries(page=1, size=10000)
+    return {
+        "module": "storage",
+        "total": total,
+        "items": items,
+        "merge_files": service.merge_files(),
+        "snapshots": {row["任务编号"]: row["快照编号"] for row in service.merge_files()},
+        "核对": _check_payload(service.merge_summary()),
+    }
+
+
+@router.get("/merge-export")
+def export_merge_files() -> dict[str, Any]:
+    """修复归并导出：把已完成的归并文件按快照编号与归档版本列成清单。"""
+    files = service.merge_files()
+    return {
+        "module": "storage",
+        "total": len(files),
+        "snapshots": {row["任务编号"]: row["快照编号"] for row in files},
+        "items": files,
+        "核对": _check_payload(service.merge_summary()),
+    }
+
+
+def _check_payload(summary: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "total": len(summary),
+        "consistent": sum(1 for item in summary if item["一致"]),
+        "inconsistent": [item for item in summary if not item["一致"]],
+    }
+
+
+@router.get("/merge-files")
+def merge_files_list() -> dict[str, Any]:
+    """归并文件数据：存储模块读取的已提交快照文件视图。"""
+    items = service.merge_files()
+    return {"module": "storage", "total": len(items), "items": items}
+
+
+@router.get("/merge-files/{download_id}")
+def merge_file_detail(download_id: str) -> dict[str, Any]:
+    """单个归并文件的下载清单与归档信息，快照编号必须一致。"""
+    item = service.merge_file(download_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail=f"归并文件 {download_id} 不存在或未完成下载")
+    return item
+
+
+@router.get("/merge-summary")
+def merge_summary() -> dict[str, Any]:
+    """状汇总清单：聚合进度、下载清单、存储归档逐项核对同一快照编号。"""
+    items = service.merge_summary()
+    return {
+        "module": "storage",
+        "total": len(items),
+        "consistent": sum(1 for item in items if item["一致"]),
+        "items": items,
+    }
+
+
+@router.get("/archives")
+def list_archives(task: str | None = Query(default=None, description="按任务编号过滤归档条目")) -> dict[str, Any]:
+    """存储分层登记的归并文件版本，保留与下载清单相同的快照编号。"""
+    items = service.archives(task)
+    return {"module": "storage", "total": len(items), "items": items}
 
 
 @router.get("/{entry_id}", response_model=dict)
@@ -56,10 +127,3 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出采集存储分层清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "storage", "total": total, "items": items}

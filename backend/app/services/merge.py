@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services import merge_files
 from app.store import store
 
 MODULE = "merge"
@@ -21,7 +22,10 @@ class MergeService:
         page: int = 1,
         size: int = 20,
     ) -> tuple[list[dict[str, Any]], int]:
+        merge_files.ensure_seeded()
         rows = store.rows(MODULE)
+        for row in rows:
+            merge_files.sync_entry_progress(row)
         if keyword:
             rows = [row for row in rows if keyword in str(row.get("任务编号", ""))]
         if status:
@@ -31,7 +35,22 @@ class MergeService:
         return rows[start:start + size], total
 
     def get_entry(self, entry_id: int) -> dict[str, Any] | None:
-        return store.find(MODULE, entry_id)
+        merge_files.ensure_seeded()
+        entry = store.find(MODULE, entry_id)
+        if entry is not None:
+            merge_files.sync_entry_progress(entry)
+        return entry
+
+    def resolve_entry(self, identifier: str | int) -> dict[str, Any] | None:
+        """聚合任务既能用内部 id，也能用任务编号（如 MERG-0002）定位。"""
+        merge_files.ensure_seeded()
+        text = str(identifier).strip()
+        entry = store.find(MODULE, int(text)) if text.isdigit() else None
+        if entry is None:
+            entry = next((row for row in store.rows(MODULE) if row.get("任务编号") == text), None)
+        if entry is not None:
+            merge_files.sync_entry_progress(entry)
+        return entry
 
     def create_entry(self, values: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
         missing = [field for field in REQUIRED_FIELDS if not str(values.get(field) or "").strip()]
@@ -58,4 +77,25 @@ class MergeService:
         entry["status"] = target
         entry["pending"] = target != STATUS_ORDER[-1]
         entry["abnormal"] = action in NEGATIVE_ACTIONS
+        merge_files.sync_entry_progress(entry)
         return entry, f"聚合任务已{action}"
+
+    def commit_snapshot(self, task_no: str, values: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
+        """把当前归并结果提交成一份快照；下载与归档只认已提交快照。"""
+        return merge_files.commit_snapshot(
+            task_no,
+            merged=values.get("已归并数"),
+            total=values.get("数据总量"),
+            shards=values.get("分片总数"),
+        )
+
+    def list_snapshots(self, task_no: str) -> list[dict[str, Any]]:
+        return merge_files.snapshots(task_no)
+
+    def start_download(self, task_no: str, values: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
+        return merge_files.create_download(
+            task_no,
+            policy=values.get("下载策略") or values.get("策略"),
+            fmt=values.get("文件格式"),
+            force=bool(values.get("强制新建") or values.get("force")),
+        )
